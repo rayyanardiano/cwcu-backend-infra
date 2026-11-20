@@ -1,0 +1,128 @@
+version: '3.9'
+
+networks:
+  cwcu_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  lavinmq_data:
+  minio_data:
+
+services:
+  # ─── Nginx Reverse Proxy (Gerbang dari Cloudflare Tunnel) ───────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: cwcu_nginx
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:80:80"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - cwcu_net
+
+  # ─── Frontend (React + Vite - Image dari Jenkins) ──────────────────────
+  frontend:
+    image: cwcu-frontend:latest
+    container_name: cwcu_frontend
+    restart: unless-stopped
+    expose:
+      - "5173"
+    networks:
+      - cwcu_net
+
+  # ─── Backend (Golang + Echo) ───────────────────────────────────────────
+  backend:
+    image: cwcu-backend:latest
+    container_name: cwcu_backend
+    restart: unless-stopped
+    expose:
+      - "8080"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      lavinmq:
+        condition: service_healthy
+    networks:
+      - cwcu_net
+
+  # ─── PostgreSQL ────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: cwcu_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-cwcu_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-cwcu_password}
+      POSTGRES_DB: ${DB_NAME:-cwcu_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cwcu_user} -d ${DB_NAME:-cwcu_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cwcu_net
+
+  # ─── Redis ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: cwcu_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cwcu_net
+
+  # ─── LavinMQ (Message Broker) ──────────────────────────────────────────
+  lavinmq:
+    image: cloudamqp/lavinmq:latest
+    container_name: cwcu_lavinmq
+    restart: unless-stopped
+    environment:
+      - LAVINMQ_DEFAULT_USER=${LAVINMQ_USER:-cwcu_user}
+      - LAVINMQ_DEFAULT_PASS=${LAVINMQ_PASS:-cwcu_password}
+    ports:
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - lavinmq_data:/var/lib/lavinmq
+    healthcheck:
+      test: ["CMD", "lavinmqctl", "status"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - cwcu_net
+
+  # ─── MinIO Storage (Object Storage PDF & Presigned URL) ─────────────────
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: cwcu_minio
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_USER:-cwcu_admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_PASSWORD:-cwcu_password123}
+    volumes:
+      - minio_data:/data
+    networks:
+      - cwcu_net
